@@ -28,7 +28,7 @@ This repository contains:
 * **Physical Constants Integration:** Real-world physics values used to ground the informational theory in material reality.
 
 ## Concept & Theory By
-**Anada Ram Bhaiyakhurd**
+**ANADA RAM BHAIYAKHURD**
 *Writer, Scientist, and Philosopher*
 
 ---
