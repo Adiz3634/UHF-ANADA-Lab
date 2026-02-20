@@ -1,4 +1,4 @@
-# UHF ANADA — SCID Engine (v5.0)
+# UHF ANADA — SCID Engine
 
 ## Overview
 **UHF ANADA** is a scientific framework and computational tool designed to analyze the stability of informational systems across multiple scales—from the **Planck Scale** ($10^{-35}m$) to the **Universal Scale**.
