@@ -1,0 +1,749 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ═══════════════════════════════════════════════
+// SCID ENGINE — Core Mathematics
+// ═══════════════════════════════════════════════
+const SCID = {
+  I:    v => Math.abs(v - Math.floor(v)) * 10,
+  C:    v => Math.abs(Math.sin(v * 0.1)) * 5,
+  S:    v => v > 0 ? -v * Math.log(v) : 0,
+  Coh:  v => 1 / (1 + SCID.I(v) + SCID.C(v)),
+  g:    v => v !== 0 ? 1 / (1 + Math.abs(v)) : 0,
+  evol: v => { const I = SCID.I(v), C = SCID.C(v); return v - (I+C)*0.01; },
+  isEq: v => (SCID.I(v) + SCID.C(v)) < 0.001,
+  pred: (v, n=5) => { const p=[]; let s=v; for(let i=0;i<n;i++){s=SCID.evol(s);p.push(s);} return p; }
+};
+
+const PHYSICS = {
+  lP:1.616255e-35, tP:5.391247e-44, EP:1.9561e9,
+  hbar:1.054571817e-34, c:2.99792458e8, G:6.67430e-11,
+  kB:1.380649e-23, a0:5.291772e-11, NA:6.02214076e23,
+  H0:2.268e-18, Rc:4.4e26, Ms:1.989e30, Me:5.972e24
+};
+
+const SCALES = {
+  planck:    { label:"PLANCK",    color:"#cc88ff", factor:PHYSICS.lP,    unit:"10⁻³⁵m" },
+  quantum:   { label:"QUANTUM",   color:"#00e5ff", factor:PHYSICS.hbar,  unit:"10⁻³⁴J·s" },
+  atomic:    { label:"ATOMIC",    color:"#00ff88", factor:PHYSICS.a0,    unit:"10⁻¹⁰m" },
+  molecular: { label:"MOLECULAR", color:"#aaff00", factor:1e-9,          unit:"10⁻⁹m" },
+  micro:     { label:"MICRO",     color:"#ffcc00", factor:1e-6,          unit:"10⁻⁶m" },
+  meso:      { label:"MESO",      color:"#ff9966", factor:1e-3,          unit:"10⁻³m" },
+  macro:     { label:"MACRO",     color:"#ff5500", factor:1,             unit:"10⁰m" },
+  cosmic:    { label:"COSMIC",    color:"#ff66bb", factor:9.461e15,      unit:"10¹⁶m" },
+  universal: { label:"UNIVERSAL", color:"#ffffff", factor:1/PHYSICS.H0,  unit:"10²⁶m" },
+};
+
+const SCALE_KEYS = Object.keys(SCALES);
+
+// ═══════════════════════════════════════════════
+// MINI WAVEFORM CANVAS
+// ═══════════════════════════════════════════════
+function WaveformCanvas({ history }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || history.length < 2) return;
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle="#000";
+    ctx.fillRect(0,0,W,H);
+    // grid
+    ctx.strokeStyle="rgba(255,255,255,0.04)";
+    ctx.lineWidth=0.5;
+    for(let i=0;i<=4;i++){const y=(H/4)*i;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+    const px=(i)=>(i/(history.length-1))*W;
+    const pyI=(v)=>H-(Math.min(v,10)/10)*(H*0.8)-H*0.07;
+    const pyC=(v)=>H-(Math.min(v,5)/5)*(H*0.8)-H*0.07;
+    // I(Ψ) cyan
+    ctx.beginPath();ctx.strokeStyle="#00e5ff";ctx.lineWidth=1.5;
+    ctx.shadowColor="#00e5ff";ctx.shadowBlur=6;
+    history.forEach((pt,i)=>{ i===0?ctx.moveTo(px(i),pyI(pt.I)):ctx.lineTo(px(i),pyI(pt.I)); });
+    ctx.stroke();ctx.shadowBlur=0;
+    // C(Ψ) orange
+    ctx.beginPath();ctx.strokeStyle="#ff5500";ctx.lineWidth=1.5;
+    ctx.shadowColor="#ff5500";ctx.shadowBlur=6;
+    history.forEach((pt,i)=>{ i===0?ctx.moveTo(px(i),pyC(pt.C)):ctx.lineTo(px(i),pyC(pt.C)); });
+    ctx.stroke();ctx.shadowBlur=0;
+  }, [history]);
+  return <canvas ref={canvasRef} width={320} height={80} style={{width:"100%",height:80,display:"block"}} />;
+}
+
+// ═══════════════════════════════════════════════
+// MINI BAR METRIC
+// ═══════════════════════════════════════════════
+function Metric({ label, value, color, barPct }) {
+  return (
+    <div style={{background:"#0a0a0a",border:"1px solid #1a1a1a",borderRadius:6,padding:"7px 10px",flex:1,minWidth:0}}>
+      <div style={{fontSize:7,letterSpacing:1.5,color:"#555",textTransform:"uppercase",marginBottom:3}}>{label}</div>
+      <div style={{fontFamily:"'Orbitron',monospace",fontSize:11,fontWeight:700,color,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{value}</div>
+      <div style={{height:2,background:"#1a1a1a",borderRadius:1}}>
+        <div style={{height:"100%",width:`${barPct}%`,background:color,borderRadius:1,transition:"width 0.4s ease"}} />
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════
+export default function UHFANADAMobile() {
+  const [cur, setCur] = useState("0");
+  const [prev, setPrev] = useState(null);
+  const [op, setOp] = useState(null);
+  const [justCalc, setJustCalc] = useState(false);
+  const [tau, setTau] = useState(0);
+  const [scale, setScale] = useState("planck");
+  const [tab, setTab] = useState("std");
+  const [screen, setScreen] = useState("calc");
+  const [history, setHistory] = useState([{I:0,C:0}]);
+  const [calcHistory, setCalcHistory] = useState([]);
+  const [mem, setMem] = useState(0);
+  const [eqFlash, setEqFlash] = useState(false);
+
+  const sn = v => { const n=parseFloat(v); return isFinite(n)?n:0; };
+  const fmt = n => isFinite(n)?parseFloat(n.toPrecision(8)).toString():"Error";
+  const clamp = (x,lo,hi) => Math.min(Math.max((x-lo)/(hi-lo)*100,0),100);
+
+  const val = sn(cur);
+  const I = SCID.I(val), C = SCID.C(val), S = SCID.S(Math.abs(val));
+  const Coh = SCID.Coh(val), grav = SCID.g(val), isEq = SCID.isEq(val);
+  const IC = I + C;
+  const pred = SCID.pred(val);
+  const phase = IC < 0.001 ? "◈ EQUILIBRIUM" : IC < 1.5 ? "STABLE" : "EVOLVING";
+  const phaseColor = IC < 0.001 ? "#00e5ff" : IC < 1.5 ? "#00ff88" : "#ff5500";
+
+  // History rolling
+  useEffect(() => {
+    setHistory(h => { const next=[...h,{I,C}]; return next.length>80?next.slice(-80):next; });
+    if(isEq && !eqFlash){ setEqFlash(true); setTimeout(()=>setEqFlash(false),2000); }
+  }, [cur]);
+
+  // ── Calculator Logic ──
+  const digit = useCallback(d => {
+    setCur(c => {
+      if(justCalc){setJustCalc(false);return d;}
+      if(c==="0")return d;
+      if(c.length>=12)return c;
+      return c+d;
+    });
+  },[justCalc]);
+
+  const decimal = () => setCur(c => { if(justCalc){setJustCalc(false);return"0.";} return c.includes(".")?c:c+"."; });
+  const clearAll = () => { setCur("0");setPrev(null);setOp(null);setJustCalc(false); };
+  const backspace = () => setCur(c => c.length>1?c.slice(0,-1):"0");
+  const toggleSign = () => setCur(c => (sn(c)*-1).toString());
+  const percent = () => setCur(c => (sn(c)/100).toString());
+
+  const doOp = o => {
+    if(op && !justCalc) calculate(true);
+    setPrev(sn(cur)); setOp(o); setJustCalc(true);
+  };
+
+  const calculate = (mid=false) => {
+    if(!op || prev===null) return;
+    const a=prev, b=sn(cur); let res;
+    if(o=>o)(op); // satisfy linter
+    switch(op){
+      case "+": res=a+b; break; case "-": res=a-b; break;
+      case "*": res=a*b; break; case "/": res=b!==0?a/b:NaN; break;
+      case "^": res=Math.pow(a,b); break; default: res=b;
+    }
+    const result = isFinite(res)?fmt(res):"Error";
+    if(!mid){
+      setCalcHistory(h=>[{expr:`${a} ${op} ${b}`,result,I:SCID.I(sn(result)),C:SCID.C(sn(result)),ts:new Date().toLocaleTimeString()},...h].slice(0,30));
+      setOp(null); setPrev(null);
+    }
+    setCur(result); setJustCalc(true); setTau(t=>t+1);
+  };
+
+  const mathFn = fn => {
+    const v=sn(cur); let res;
+    switch(fn){
+      case "sin": res=Math.sin(v); break; case "cos": res=Math.cos(v); break;
+      case "tan": res=Math.tan(v); break; case "asin": res=Math.asin(v); break;
+      case "acos": res=Math.acos(v); break; case "atan": res=Math.atan(v); break;
+      case "log": res=Math.log10(v); break; case "ln": res=Math.log(v); break;
+      case "sqrt": res=Math.sqrt(v); break; case "sq": res=v*v; break;
+      case "cube": res=v*v*v; break; case "exp": res=Math.exp(v); break;
+      case "inv": res=1/v; break; case "abs": res=Math.abs(v); break;
+      case "pi": setCur(Math.PI.toString());setJustCalc(false);return;
+      case "e": setCur(Math.E.toString());setJustCalc(false);return;
+      case "phi": setCur((1.6180339887).toString());setJustCalc(false);return;
+      default: return;
+    }
+    setCur(isFinite(res)?fmt(res):"Error"); setJustCalc(true); setTau(t=>t+1);
+  };
+
+  const scidFn = fn => {
+    const v=sn(cur); let res;
+    switch(fn){
+      case "psi": res=v; break;
+      case "I": res=SCID.I(v); break;
+      case "C": res=SCID.C(v); break;
+      case "S": res=SCID.S(Math.abs(v)); break;
+      case "Coh": res=SCID.Coh(v); break;
+      case "g": res=SCID.g(v); break;
+      case "evol": res=SCID.evol(v); break;
+      case "evol3": let p=v;for(let i=0;i<3;i++)p=SCID.evol(p);res=p;break;
+      case "gradient": res=-(SCID.I(v)+SCID.C(v)); break;
+      case "mass": res=Math.abs(v/(1+Math.abs(v))); break;
+      case "qcollapse": res=Math.round(v); break;
+      case "dspace": res=Math.abs(v-Math.round(v)); break;
+      case "tau": res=tau; break;
+      default: return;
+    }
+    setCur(isFinite(res)?fmt(res):"Error"); setJustCalc(true); setTau(t=>t+1);
+  };
+
+  const scaleFn = s => {
+    const v=sn(cur);
+    const sc=SCALES[s];
+    if(!sc)return;
+    const res=v*sc.factor;
+    setCur(isFinite(res)?fmt(res):"Error"); setJustCalc(true); setScale(s); setTau(t=>t+1);
+  };
+
+  // ── BUTTONS ──
+  const Btn = ({label,onClick,color="#e8e8e8",bg="#111",border="#222",size=15,flex=1,span=false}) => (
+    <button onClick={onClick} style={{
+      flex:span?2:flex, padding:"13px 4px", background:bg, border:`1px solid ${border}`,
+      borderRadius:6, color, fontFamily:"'Share Tech Mono',monospace", fontSize:size,
+      cursor:"pointer", transition:"all 0.1s", outline:"none", letterSpacing:0.5,
+      WebkitTapHighlightColor:"transparent"
+    }}
+    onMouseDown={e=>e.currentTarget.style.transform="scale(0.94)"}
+    onMouseUp={e=>e.currentTarget.style.transform="scale(1)"}
+    >{label}</button>
+  );
+
+  const numBg="#161616", numBorder="#2a2a2a";
+  const opBg="rgba(255,85,0,0.06)", opBorder="rgba(255,85,0,0.2)";
+  const fnBg="rgba(0,229,255,0.05)", fnBorder="rgba(0,229,255,0.18)";
+  const scidBg="rgba(204,136,255,0.05)", scidBorder="rgba(204,136,255,0.2)";
+
+  // ── SCALE INFO ──
+  const scaleInfo = () => {
+    const v=sn(cur), sc=SCALES[scale];
+    switch(scale){
+      case "planck":    return [{k:"Ψ / ℓP",v:`${(v/PHYSICS.lP).toExponential(3)}`},{k:"E_P × Ψ",v:`${(v*PHYSICS.EP).toExponential(3)} J`},{k:"t_P × Ψ",v:`${(v*PHYSICS.tP).toExponential(3)} s`},{k:"GΨ/c⁴",v:`${(v*PHYSICS.G/Math.pow(PHYSICS.c,4)).toExponential(3)} m⁻²`}];
+      case "quantum":   return [{k:"Action Ψ/ħ",v:`${(v/PHYSICS.hbar).toExponential(3)} quanta`},{k:"ZPE ½ħΨ",v:`${(0.5*PHYSICS.hbar*Math.abs(v)).toExponential(3)} J`},{k:"Tunnel e⁻²|Ψ|",v:`${Math.exp(-2*Math.abs(v)).toExponential(3)}`},{k:"deBroglie λ",v:`${(PHYSICS.hbar/(Math.abs(v)*9.109e-31+1e-50)).toExponential(3)} m`}];
+      case "atomic":    return [{k:"Ψ / a₀",v:`${(v/PHYSICS.a0).toExponential(3)} a₀`},{k:"H-E = −13.6/Ψ²",v:`${(-13.6/Math.max(v*v,0.001)).toFixed(4)} eV`},{k:"r = a₀Ψ²",v:`${(PHYSICS.a0*v*v).toExponential(3)} m`},{k:"Ionization",v:`${(13.6/Math.max(v*v,0.001)).toFixed(4)} eV`}];
+      case "molecular": return [{k:"Bond Ψ×0.154",v:`${(v*0.154).toFixed(5)} nm`},{k:"Thermal kB×300×Ψ",v:`${(PHYSICS.kB*300*v).toExponential(3)} J`},{k:"Avogadro×Ψ",v:`${(v*PHYSICS.NA).toExponential(3)}`},{k:"vdW Ψ×0.34",v:`${(v*0.34).toFixed(5)} nm`}];
+      case "macro":     return [{k:"KE ½Ψ² (1kg)",v:`${(0.5*v*v).toExponential(3)} J`},{k:"Light-time Ψ/c",v:`${(v/PHYSICS.c).toExponential(3)} s`},{k:"GM⊕Ψ",v:`${(PHYSICS.Me*PHYSICS.G*Math.abs(v)).toExponential(3)} J/kg`},{k:"SI meters",v:`${v.toFixed(6)} m`}];
+      case "cosmic":    return [{k:"Distance Ψ/ly",v:`${(v/9.461e15).toExponential(3)} ly`},{k:"Solar masses ×M☉",v:`${(v*PHYSICS.Ms).toExponential(3)} kg`},{k:"Redshift z≈H₀Ψ/c",v:`${(PHYSICS.H0*Math.abs(v)/PHYSICS.c).toExponential(3)}`},{k:"Schwarzschild r",v:`${(2*PHYSICS.G*Math.abs(v)*PHYSICS.Ms/(PHYSICS.c*PHYSICS.c)).toExponential(3)} m`}];
+      case "universal": return [{k:"Hubble Ψ×H₀",v:`${(v*PHYSICS.H0).toExponential(3)} H₀`},{k:"Universe age×Ψ",v:`${(v*4.35e17).toExponential(3)} s`},{k:"Cosmic ratio",v:`${(v/PHYSICS.Rc).toExponential(3)} R_obs`},{k:"Dark energy ρ×Ψ",v:`${(v*5.9e-27).toExponential(3)} kg/m³`}];
+      default: return [{k:"Factor",v:`×${sc.factor.toExponential(3)}`},{k:"Scaled Ψ",v:`${(v*sc.factor).toExponential(3)}`},{k:"Scale",v:sc.unit},{k:"log₁₀",v:`${Math.log10(Math.abs(v*sc.factor)+1e-100).toFixed(3)}`}];
+    }
+  };
+
+  // ═══ RENDER ═══
+  const displayColor = cur==="Error"?"#ff2244":isEq?"#00e5ff":justCalc?"#00ff88":"#ffffff";
+
+  return (
+    <div style={{
+      minHeight:"100vh", background:"#000", color:"#e8e8e8",
+      fontFamily:"'Share Tech Mono',monospace",
+      display:"flex", justifyContent:"center", padding:"16px 0 40px",
+      backgroundImage:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(255,255,255,0.004) 2px,rgba(255,255,255,0.004) 4px)"
+    }}>
+      {/* Phone Frame */}
+      <div style={{
+        width:"100%", maxWidth:400, display:"flex", flexDirection:"column", gap:0,
+        border:"1px solid #1a1a1a", borderRadius:24, overflow:"hidden",
+        boxShadow:"0 0 80px rgba(0,229,255,0.05), 0 0 160px rgba(0,0,0,0.8)"
+      }}>
+
+        {/* ── STATUS BAR ── */}
+        <div style={{
+          background:"#000", padding:"10px 18px 6px",
+          display:"flex", alignItems:"center", justifyContent:"space-between",
+          borderBottom:"1px solid #0a0a0a"
+        }}>
+          <div style={{
+            fontFamily:"'Orbitron',monospace", fontSize:10, fontWeight:900,
+            letterSpacing:5, color:"#fff"
+          }}>UHF ANADA</div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <div style={{fontSize:7,letterSpacing:2,color:phaseColor,padding:"3px 8px",border:`1px solid ${phaseColor}33`,borderRadius:10}}>{phase}</div>
+            <div style={{width:6,height:6,borderRadius:"50%",background:"#00ff88",boxShadow:"0 0 8px #00ff88",animation:"pulse 2s infinite"}} />
+          </div>
+        </div>
+
+        {/* ── NAV TABS ── */}
+        <div style={{display:"flex",background:"#050505",borderBottom:"1px solid #111"}}>
+          {[["calc","CALC"],["monitor","MONITOR"],["scale","SCALE"],["history","LOG"]].map(([id,label])=>(
+            <button key={id} onClick={()=>setScreen(id)} style={{
+              flex:1, padding:"9px 0", background:"none", border:"none",
+              borderBottom:screen===id?"2px solid #fff":"2px solid transparent",
+              color:screen===id?"#fff":"#555",
+              fontFamily:"'Orbitron',monospace", fontSize:7, letterSpacing:1.5,
+              cursor:"pointer", transition:"all 0.2s", textTransform:"uppercase"
+            }}>{label}</button>
+          ))}
+        </div>
+
+        {/* ══════════════════════════════
+            SCREEN: CALCULATOR
+        ══════════════════════════════ */}
+        {screen==="calc" && (
+          <div style={{display:"flex",flexDirection:"column",flex:1}}>
+
+            {/* Display */}
+            <div style={{
+              background:"#000", padding:"12px 16px 10px",
+              borderBottom:"1px solid #0d0d0d",
+              position:"relative",
+              ...(eqFlash?{boxShadow:"inset 0 0 40px rgba(0,229,255,0.12)"}:{})
+            }}>
+              <div style={{textAlign:"right",fontSize:7,color:"rgba(204,136,255,0.4)",marginBottom:3,fontFamily:"'Share Tech Mono',monospace",letterSpacing:1}}>
+                Ψ·τ={tau}·{scale.toUpperCase()}
+              </div>
+              <div style={{textAlign:"right",fontSize:11,color:"#444",minHeight:16,marginBottom:4}}>
+                {prev!=null?`${prev} ${op}`:""}
+              </div>
+              <div style={{
+                textAlign:"right",
+                fontFamily:"'Orbitron',monospace", fontWeight:700,
+                fontSize:cur.length>10?24:cur.length>7?30:38,
+                color:displayColor,
+                minHeight:48,lineHeight:"1.2",
+                textShadow:isEq?"0 0 30px rgba(0,229,255,0.6)":justCalc?"0 0 20px rgba(0,255,136,0.3)":"none",
+                transition:"color 0.2s"
+              }}>{cur}</div>
+              <div style={{textAlign:"right",fontSize:7,color:"#444",letterSpacing:2,marginTop:3}}>
+                I={I.toFixed(3)} · C={C.toFixed(3)} · Coh={Coh.toFixed(3)}
+              </div>
+              {/* Scale indicators */}
+              <div style={{display:"flex",gap:4,marginTop:6,justifyContent:"flex-end",flexWrap:"wrap"}}>
+                {["planck","quantum","macro","cosmic","universal"].map(s=>(
+                  <span key={s} onClick={()=>setScale(s)} style={{
+                    fontSize:6,letterSpacing:1,padding:"2px 5px",borderRadius:3,
+                    cursor:"pointer",
+                    border:`1px solid ${scale===s?SCALES[s].color+"66":"#1a1a1a"}`,
+                    color:scale===s?SCALES[s].color:"#333",
+                    background:scale===s?SCALES[s].color+"11":"transparent"
+                  }}>{s.toUpperCase()}</span>
+                ))}
+              </div>
+            </div>
+
+            {/* Calculator Tabs */}
+            <div style={{display:"flex",background:"#050505",borderBottom:"1px solid #0d0d0d"}}>
+              {["std","sci","scid","scale","mem"].map(t=>(
+                <button key={t} onClick={()=>setTab(t)} style={{
+                  flex:1,padding:"7px 0",background:"none",border:"none",
+                  borderBottom:tab===t?"2px solid #fff":"2px solid transparent",
+                  color:tab===t?"#fff":"#555",
+                  fontFamily:"'Orbitron',monospace",fontSize:7,letterSpacing:1,
+                  cursor:"pointer",textTransform:"uppercase"
+                }}>{t}</button>
+              ))}
+            </div>
+
+            {/* Button Grid */}
+            <div style={{padding:"8px",background:"#030303",flex:1}}>
+
+              {/* STANDARD TAB */}
+              {tab==="std" && (
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="AC" onClick={clearAll} color="#ff2244" bg="rgba(255,34,68,0.06)" border="rgba(255,34,68,0.2)" />
+                    <Btn label="±" onClick={toggleSign} color="#ff5500" bg={opBg} border={opBorder} />
+                    <Btn label="%" onClick={percent} color="#ff5500" bg={opBg} border={opBorder} />
+                    <Btn label="÷" onClick={()=>doOp("/")} color="#ff5500" bg={opBg} border={opBorder} size={18} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["7","8","9"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={17} />)}
+                    <Btn label="×" onClick={()=>doOp("*")} color="#ff5500" bg={opBg} border={opBorder} size={18} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["4","5","6"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={17} />)}
+                    <Btn label="−" onClick={()=>doOp("-")} color="#ff5500" bg={opBg} border={opBorder} size={18} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["1","2","3"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={17} />)}
+                    <Btn label="+" onClick={()=>doOp("+")} color="#ff5500" bg={opBg} border={opBorder} size={18} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="0" onClick={()=>digit("0")} color="#fff" bg={numBg} border={numBorder} size={17} span />
+                    <Btn label="." onClick={decimal} color="#fff" bg={numBg} border={numBorder} size={17} />
+                    <Btn label="=" onClick={()=>calculate()} color="#000" bg="#ffffff" border="none" size={16} />
+                  </div>
+                </div>
+              )}
+
+              {/* SCIENTIFIC TAB */}
+              {tab==="sci" && (
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{display:"flex",gap:4}}>
+                    {[["sin","sin"],["cos","cos"],["tan","tan"],["asin","sin⁻¹"],["acos","cos⁻¹"]].map(([fn,lb])=>
+                      <Btn key={fn} label={lb} onClick={()=>mathFn(fn)} color="#00e5ff" bg={fnBg} border={fnBorder} size={9} />)}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    {[["log","log"],["ln","ln"],["sqrt","√"],["sq","x²"],["cube","x³"]].map(([fn,lb])=>
+                      <Btn key={fn} label={lb} onClick={()=>mathFn(fn)} color="#00e5ff" bg={fnBg} border={fnBorder} size={10} />)}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    {[["exp","eˣ"],["inv","1/x"],["abs","|x|"],["pi","π"],["e","e"]].map(([fn,lb])=>
+                      <Btn key={fn} label={lb} onClick={()=>mathFn(fn)} color="#00e5ff" bg={fnBg} border={fnBorder} size={11} />)}
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["7","8","9"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="÷" onClick={()=>doOp("/")} color="#ff5500" bg={opBg} border={opBorder} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["4","5","6"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="×" onClick={()=>doOp("*")} color="#ff5500" bg={opBg} border={opBorder} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["1","2","3"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="=" onClick={()=>calculate()} color="#000" bg="#fff" border="none" />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="0" onClick={()=>digit("0")} color="#fff" bg={numBg} border={numBorder} size={15} span />
+                    <Btn label="AC" onClick={clearAll} color="#ff2244" bg="rgba(255,34,68,0.06)" border="rgba(255,34,68,0.2)" />
+                    <Btn label="⌫" onClick={backspace} color="#ff5500" bg={opBg} border={opBorder} />
+                  </div>
+                </div>
+              )}
+
+              {/* SCID TAB */}
+              {tab==="scid" && (
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{display:"flex",gap:4}}>
+                    {[["I","I(Ψ)"],["C","C(Ψ)"],["S","S(Ψ)"],["Coh","Coh(Ψ)"]].map(([fn,lb])=>
+                      <Btn key={fn} label={lb} onClick={()=>scidFn(fn)} color="#cc88ff" bg={scidBg} border={scidBorder} size={10} />)}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    {[["g","g(Ψ)"],["mass","m(Ψ)"],["gradient","−∇"],["tau","τ"]].map(([fn,lb])=>
+                      <Btn key={fn} label={lb} onClick={()=>scidFn(fn)} color="#cc88ff" bg={scidBg} border={scidBorder} size={10} />)}
+                  </div>
+                  <div style={{display:"flex",gap:4}}>
+                    {[["evol","Ψ(τ+1)"],["evol3","Ψ(τ+3)"],["qcollapse","Q◈"],["dspace","ΔSpace"]].map(([fn,lb])=>
+                      <Btn key={fn} label={lb} onClick={()=>scidFn(fn)} color="#cc88ff" bg={scidBg} border={scidBorder} size={10} />)}
+                  </div>
+                  {/* SCID metrics */}
+                  <div style={{background:"#050505",border:"1px solid #111",borderRadius:6,padding:8,display:"flex",flexDirection:"column",gap:5}}>
+                    {[["I(Ψ) = Instability",I.toFixed(5),"#00e5ff"],["C(Ψ) = Inconsistency",C.toFixed(5),"#ff5500"],["S(Ψ) = Entropy",(isFinite(S)?S.toFixed(5):"∞"),"#cc88ff"],["Coh(Ψ) = Coherence",Coh.toFixed(5),"#00ff88"]].map(([lb,val,col])=>(
+                      <div key={lb} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:9}}>
+                        <span style={{color:"#555"}}>{lb}</span>
+                        <span style={{fontFamily:"'Orbitron',monospace",color:col,fontSize:10}}>{val}</span>
+                      </div>
+                    ))}
+                    <div style={{borderTop:"1px solid #111",paddingTop:5,display:"flex",justifyContent:"space-between",fontSize:9}}>
+                      <span style={{color:"#555"}}>I+C Composite</span>
+                      <span style={{fontFamily:"'Orbitron',monospace",color:phaseColor}}>{IC.toFixed(5)}</span>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["7","8","9"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="AC" onClick={clearAll} color="#ff2244" bg="rgba(255,34,68,0.06)" border="rgba(255,34,68,0.2)" />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["4","5","6","1","2","3"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="0" onClick={()=>digit("0")} color="#fff" bg={numBg} border={numBorder} size={15} span />
+                    <Btn label="." onClick={decimal} color="#fff" bg={numBg} border={numBorder} size={15} />
+                    <Btn label="=" onClick={()=>calculate()} color="#000" bg="#fff" border="none" />
+                  </div>
+                </div>
+              )}
+
+              {/* SCALE TAB */}
+              {tab==="scale" && (
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {SCALE_KEYS.map(s=>(
+                      <button key={s} onClick={()=>scaleFn(s)} style={{
+                        flex:"1 1 calc(25% - 4px)", padding:"8px 4px",
+                        background:scale===s?SCALES[s].color+"22":"#0a0a0a",
+                        border:`1px solid ${scale===s?SCALES[s].color+"66":"#1a1a1a"}`,
+                        borderRadius:5, color:scale===s?SCALES[s].color:"#555",
+                        fontFamily:"'Orbitron',monospace", fontSize:7, cursor:"pointer",
+                        letterSpacing:1
+                      }}>{SCALES[s].label}</button>
+                    ))}
+                  </div>
+                  {/* Scale output */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+                    {scaleInfo().map(({k,v})=>(
+                      <div key={k} style={{background:"#080808",border:"1px solid #161616",borderRadius:5,padding:"7px 9px"}}>
+                        <div style={{fontSize:7,color:"#444",marginBottom:3,letterSpacing:1}}>{k}</div>
+                        <div style={{fontFamily:"'Orbitron',monospace",fontSize:10,color:SCALES[scale].color,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["7","8","9"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="AC" onClick={clearAll} color="#ff2244" bg="rgba(255,34,68,0.06)" border="rgba(255,34,68,0.2)" />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["4","5","6"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="+" onClick={()=>doOp("+")} color="#ff5500" bg={opBg} border={opBorder} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="0" onClick={()=>digit("0")} color="#fff" bg={numBg} border={numBorder} size={15} span />
+                    <Btn label="." onClick={decimal} color="#fff" bg={numBg} border={numBorder} size={15} />
+                    <Btn label="=" onClick={()=>calculate()} color="#000" bg="#fff" border="none" />
+                  </div>
+                </div>
+              )}
+
+              {/* MEM TAB */}
+              {tab==="mem" && (
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{background:"#050505",border:"1px solid #111",borderRadius:6,padding:10,textAlign:"center"}}>
+                    <div style={{fontSize:7,color:"#555",marginBottom:4,letterSpacing:2}}>MEMORY STORE</div>
+                    <div style={{fontFamily:"'Orbitron',monospace",fontSize:22,color:"#ffcc00"}}>{mem}</div>
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="MC" onClick={()=>setMem(0)} color="#ffcc00" bg="rgba(255,204,0,0.05)" border="rgba(255,204,0,0.2)" />
+                    <Btn label="MR" onClick={()=>{setCur(mem.toString());setJustCalc(false);}} color="#ffcc00" bg="rgba(255,204,0,0.05)" border="rgba(255,204,0,0.2)" />
+                    <Btn label="M+" onClick={()=>setMem(m=>m+sn(cur))} color="#ffcc00" bg="rgba(255,204,0,0.05)" border="rgba(255,204,0,0.2)" />
+                    <Btn label="M−" onClick={()=>setMem(m=>m-sn(cur))} color="#ffcc00" bg="rgba(255,204,0,0.05)" border="rgba(255,204,0,0.2)" />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["7","8","9"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="AC" onClick={clearAll} color="#ff2244" bg="rgba(255,34,68,0.06)" border="rgba(255,34,68,0.2)" />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["4","5","6"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="×" onClick={()=>doOp("*")} color="#ff5500" bg={opBg} border={opBorder} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    {["1","2","3"].map(d=><Btn key={d} label={d} onClick={()=>digit(d)} color="#fff" bg={numBg} border={numBorder} size={15} />)}
+                    <Btn label="÷" onClick={()=>doOp("/")} color="#ff5500" bg={opBg} border={opBorder} />
+                  </div>
+                  <div style={{display:"flex",gap:5}}>
+                    <Btn label="0" onClick={()=>digit("0")} color="#fff" bg={numBg} border={numBorder} size={15} span />
+                    <Btn label="." onClick={decimal} color="#fff" bg={numBg} border={numBorder} size={15} />
+                    <Btn label="=" onClick={()=>calculate()} color="#000" bg="#fff" border="none" />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════
+            SCREEN: MONITOR
+        ══════════════════════════════ */}
+        {screen==="monitor" && (
+          <div style={{flex:1,display:"flex",flexDirection:"column",gap:0}}>
+            {/* System Rail */}
+            <div style={{padding:"8px",background:"#030303",borderBottom:"1px solid #0d0d0d"}}>
+              <div style={{fontSize:7,color:"#333",letterSpacing:2,marginBottom:6,textTransform:"uppercase"}}>▸ System Metrics</div>
+              <div style={{display:"flex",gap:5,marginBottom:5}}>
+                <Metric label="Ψ State" value={val.toFixed(4)} color="#00e5ff" barPct={clamp(Math.abs(val),0,100)} />
+                <Metric label="I(Ψ) Instability" value={I.toFixed(4)} color="#b0b0b0" barPct={clamp(I,0,10)} />
+              </div>
+              <div style={{display:"flex",gap:5,marginBottom:5}}>
+                <Metric label="C(Ψ) Inconsistency" value={C.toFixed(4)} color="#ff5500" barPct={clamp(C,0,5)} />
+                <Metric label="τ Transitions" value={tau} color="#ffcc00" barPct={clamp(tau,0,500)} />
+              </div>
+              <div style={{display:"flex",gap:5,marginBottom:5}}>
+                <Metric label="S(Ψ) Entropy" value={isFinite(S)?S.toFixed(4):"∞"} color="#cc88ff" barPct={clamp(isFinite(S)?S:0,0,10)} />
+                <Metric label="Coh(Ψ) Coherence" value={Coh.toFixed(4)} color="#00ff88" barPct={Coh*100} />
+              </div>
+              <div style={{display:"flex",gap:5}}>
+                <Metric label="I+C Composite" value={IC.toFixed(4)} color="#e8e8e8" barPct={clamp(IC,0,15)} />
+                <Metric label="System Phase" value={phase} color={phaseColor} barPct={IC<0.001?100:IC<1.5?75:30} />
+              </div>
+            </div>
+
+            {/* Waveform */}
+            <div style={{borderBottom:"1px solid #0d0d0d"}}>
+              <div style={{padding:"6px 10px",background:"#030303",borderBottom:"1px solid #0d0d0d",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:7,color:"#444",letterSpacing:2}}>I(Ψ)/C(Ψ) WAVEFORM · LIVE</span>
+                <span style={{display:"flex",gap:8,fontSize:7}}>
+                  <span style={{color:"#00e5ff"}}>■ I(Ψ)</span>
+                  <span style={{color:"#ff5500"}}>■ C(Ψ)</span>
+                </span>
+              </div>
+              <WaveformCanvas history={history} />
+            </div>
+
+            {/* 5τ Predictions */}
+            <div style={{padding:8,background:"#030303",borderBottom:"1px solid #0d0d0d"}}>
+              <div style={{fontSize:7,color:"#444",letterSpacing:2,marginBottom:6}}>▸ PREDICTIVE PATH · NEXT 5τ</div>
+              <div style={{display:"flex",gap:4}}>
+                {pred.map((pv,i)=>{
+                  const pI=SCID.I(pv),pC=SCID.C(pv),pIC=pI+pC;
+                  const prevIC=i===0?IC:(SCID.I(pred[i-1])+SCID.C(pred[i-1]));
+                  const down=pIC<prevIC;
+                  return (
+                    <div key={i} style={{flex:1,background:"#0a0a0a",border:"1px solid #161616",borderRadius:5,padding:"6px 4px",textAlign:"center"}}>
+                      <div style={{fontSize:7,color:"#cc88ff",marginBottom:3}}>τ+{i+1}</div>
+                      <div style={{fontFamily:"'Orbitron',monospace",fontSize:9,color:"#e8e8e8",marginBottom:2}}>{pv.toFixed(3)}</div>
+                      <div style={{fontSize:7,color:"#555"}}>{pIC.toFixed(3)}</div>
+                      <div style={{fontSize:10,color:down?"#00ff88":"#ff5500"}}>{down?"▼":"▲"}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Equilibrium state */}
+            <div style={{
+              padding:"10px 12px",
+              background:isEq?"rgba(0,229,255,0.05)":"#030303",
+              border:"none",
+              transition:"background 0.5s"
+            }}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:7,color:"#444",letterSpacing:2,marginBottom:3}}>EQUILIBRIUM CONDITION</div>
+                  <div style={{fontFamily:"'Orbitron',monospace",fontSize:10,color:"#444"}}>I(Ψ) + C(Ψ) &lt; 0.001</div>
+                </div>
+                <div style={{
+                  fontFamily:"'Orbitron',monospace",fontSize:13,fontWeight:700,
+                  color:isEq?"#00e5ff":"#222",
+                  textShadow:isEq?"0 0 20px rgba(0,229,255,0.8)":"none",
+                  transition:"all 0.3s"
+                }}>◈ {isEq?"REACHED":"—"}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════
+            SCREEN: SCALE
+        ══════════════════════════════ */}
+        {screen==="scale" && (
+          <div style={{flex:1,display:"flex",flexDirection:"column"}}>
+            {/* Scale selector */}
+            <div style={{padding:8,background:"#030303",borderBottom:"1px solid #0d0d0d"}}>
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {SCALE_KEYS.map(s=>(
+                  <button key={s} onClick={()=>setScale(s)} style={{
+                    flex:"1 1 calc(33% - 4px)",padding:"7px 4px",
+                    background:scale===s?SCALES[s].color+"22":"#0a0a0a",
+                    border:`1px solid ${scale===s?SCALES[s].color+"88":"#1a1a1a"}`,
+                    borderRadius:5,color:scale===s?SCALES[s].color:"#444",
+                    fontFamily:"'Orbitron',monospace",fontSize:7,cursor:"pointer",letterSpacing:1
+                  }}>
+                    <div>{SCALES[s].label}</div>
+                    <div style={{fontSize:6,opacity:0.6,marginTop:2}}>{SCALES[s].unit}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Active scale info */}
+            <div style={{padding:10,background:"#030303",borderBottom:"1px solid #0d0d0d"}}>
+              <div style={{
+                fontFamily:"'Orbitron',monospace",fontSize:11,color:SCALES[scale].color,
+                letterSpacing:3,marginBottom:4
+              }}>{SCALES[scale].label} SCALE</div>
+              <div style={{fontSize:8,color:"#444",letterSpacing:1}}>{SCALES[scale].unit} — factor: {SCALES[scale].factor.toExponential(3)}</div>
+            </div>
+
+            {/* Scale outputs */}
+            <div style={{padding:8,display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+              {scaleInfo().map(({k,v})=>(
+                <div key={k} style={{
+                  background:"#080808",border:`1px solid ${SCALES[scale].color}22`,
+                  borderRadius:6,padding:"9px 10px"
+                }}>
+                  <div style={{fontSize:7,color:"#444",letterSpacing:1,marginBottom:4}}>{k}</div>
+                  <div style={{fontFamily:"'Orbitron',monospace",fontSize:11,color:SCALES[scale].color,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.split(" ")[0]}</div>
+                  <div style={{fontSize:7,color:"#444",marginTop:2}}>{v.split(" ").slice(1).join(" ")}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Cosmic bar visualization */}
+            <div style={{padding:"8px 10px",background:"#030303",flex:1}}>
+              <div style={{fontSize:7,color:"#333",letterSpacing:2,marginBottom:8}}>▸ ALL 9 SCALES — LOG COMPARISON</div>
+              {SCALE_KEYS.map(s=>{
+                const sv=val*SCALES[s].factor;
+                const logV=sv!==0?Math.log10(Math.abs(sv)+1e-100):-100;
+                const barW=Math.min(Math.max((logV+100)/145,0),1)*100;
+                return (
+                  <div key={s} onClick={()=>setScale(s)} style={{
+                    display:"flex",alignItems:"center",gap:8,marginBottom:5,cursor:"pointer",
+                    opacity:scale===s?1:0.5,transition:"opacity 0.2s"
+                  }}>
+                    <div style={{width:56,fontFamily:"'Orbitron',monospace",fontSize:7,color:SCALES[s].color,textAlign:"right"}}>{SCALES[s].label}</div>
+                    <div style={{flex:1,height:6,background:"#111",borderRadius:3,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${barW}%`,background:SCALES[s].color,borderRadius:3,boxShadow:scale===s?`0 0 6px ${SCALES[s].color}`:"none",transition:"width 0.5s"}} />
+                    </div>
+                    <div style={{width:50,fontSize:7,color:"#444",textAlign:"right",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sv.toExponential(1)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════
+            SCREEN: HISTORY LOG
+        ══════════════════════════════ */}
+        {screen==="history" && (
+          <div style={{flex:1,display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"6px 12px",background:"#030303",borderBottom:"1px solid #0d0d0d",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:7,color:"#444",letterSpacing:2}}>CALCULATION LOG · {calcHistory.length} ENTRIES</span>
+              <button onClick={()=>setCalcHistory([])} style={{fontSize:7,color:"#ff2244",background:"none",border:"1px solid rgba(255,34,68,0.2)",padding:"2px 8px",borderRadius:3,cursor:"pointer",fontFamily:"'Share Tech Mono',monospace",letterSpacing:1}}>CLEAR</button>
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:8,display:"flex",flexDirection:"column",gap:5}}>
+              {calcHistory.length===0?(
+                <div style={{textAlign:"center",padding:30,color:"#333",fontSize:9,letterSpacing:1}}>
+                  <div style={{fontFamily:"'Orbitron',monospace",fontSize:20,marginBottom:8,opacity:0.2}}>◈</div>
+                  No calculations yet.<br/>Start computing to see history.
+                </div>
+              ):calcHistory.map((entry,i)=>(
+                <div key={i} style={{background:"#080808",border:"1px solid #141414",borderRadius:6,padding:"9px 11px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                    <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:9,color:"#555"}}>{entry.expr}</div>
+                    <div style={{fontSize:7,color:"#333"}}>{entry.ts}</div>
+                  </div>
+                  <div style={{fontFamily:"'Orbitron',monospace",fontSize:14,color:"#00ff88",marginBottom:5}}>{entry.result}</div>
+                  <div style={{display:"flex",gap:6,fontSize:7}}>
+                    <span style={{color:"#00e5ff"}}>I={entry.I.toFixed(3)}</span>
+                    <span style={{color:"#ff5500"}}>C={entry.C.toFixed(3)}</span>
+                    <span style={{color:SCID.isEq(parseFloat(entry.result))?"#00e5ff":"#333",marginLeft:"auto"}}>
+                      {SCID.isEq(parseFloat(entry.result))?"◈ EQ":""}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* SCID Symbol Reference */}
+            <div style={{padding:"8px 12px",background:"#030303",borderTop:"1px solid #0d0d0d"}}>
+              <div style={{fontSize:7,color:"#333",letterSpacing:2,marginBottom:6}}>▸ SCID REFERENCE</div>
+              {[["Ψ","Complete informational state"],["I(Ψ)","Local instability = |Ψ−⌊Ψ⌋|×10"],["C(Ψ)","Inconsistency = |sin(Ψ×0.1)|×5"],["τ","Valid state transitions"],["dΨ/dτ","Evolution: Ψ−(I+C)×0.01"],["◈","Absolute Equilibrium: I+C<0.001"]].map(([sym,desc])=>(
+                <div key={sym} style={{display:"flex",gap:8,marginBottom:4,fontSize:8}}>
+                  <span style={{color:"#e8e8e8",fontFamily:"'Share Tech Mono',monospace",minWidth:40}}>{sym}</span>
+                  <span style={{color:"#444"}}>{desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── FOOTER ── */}
+        <div style={{
+          background:"#000",padding:"8px 16px",borderTop:"1px solid #0d0d0d",
+          textAlign:"center",fontSize:6,letterSpacing:2,color:"#222",lineHeight:2
+        }}>
+          <div style={{fontFamily:"'Orbitron',monospace",fontSize:9,fontWeight:900,letterSpacing:5,color:"#2a2a2a"}}>UHF ANADA</div>
+          <div>CONCEPT BY <span style={{color:"#ff5500"}}>ANADA RAM BHAIYAKHURD</span></div>
+          <div>SCID · dΨ/dτ = −∇(I+C) · MIT OPEN SOURCE</div>
+        </div>
+
+      </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap');
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 3px; }
+        ::-webkit-scrollbar-track { background: #000; }
+        ::-webkit-scrollbar-thumb { background: #1a1a1a; border-radius: 2px; }
+        @keyframes pulse { 0%,100%{transform:scale(1);opacity:1;} 50%{transform:scale(0.5);opacity:0.3;} }
+      `}</style>
+    </div>
+  );
+}
